@@ -7,7 +7,7 @@ export default async function handler(req, res) {
   const daysAgo = req.body.daysAgo;
 
   async function get_metrics_ID(apiKey) {
-    const url = `https://a.klaviyo.com/api/v1/metrics?page=0&count=50&api_key=${apiKey}`;
+    const url = `https://a.klaviyo.com/api/v1/metrics?page=0&count=100&api_key=${apiKey}`;
     const options = { method: "GET", headers: { Accept: "application/json" } };
 
     return fetch(url, options)
@@ -28,26 +28,27 @@ export default async function handler(req, res) {
   }
 
   async function fetch_variation_counts(apiKey, metricID, startDate, endDate) {
-    const url = `https://a.klaviyo.com/api/v1/metric/${metricID}/export?start_date=${startDate}&end_date=${endDate}&unit=day&measurement=count&by=%24variation&count=1000&api_key=${apiKey}`;
+    const url = `https://a.klaviyo.com/api/v1/metric/${metricID}/export?start_date=${startDate}&end_date=${endDate}&unit=month&measurement=count&by=%24variation&count=1000&api_key=${apiKey}`;
     const options = { method: "GET", headers: { Accept: "application/json" } };
     const regex = /\(\w{6}\)/;
 
-    return await fetch(url, options)
-      .then((res) => res.json())
-      .then((json) => {
-        const results = json.results;
-        const varDict = {};
-        results.forEach((record) => {
-          const varID = String(record.segment.match(regex)).slice(1, 7);
-          const varCountRecords = record.data;
-          const varTotalCount = varCountRecords.reduce((sum, subRecord) => {
-            return sum + subRecord.values[0];
-          }, 0);
-          varDict[varID] = varTotalCount;
+    try {
+      const json = await fetch(url, options).then((res) => res.json());
+      const results = json.results;
+      const varDict = {};
+      results.forEach((record) => {
+        const varID = String(record.segment.match(regex)).slice(1, 7);
+        const varCountRecords = record.data;
+        let varTotalCount = 0;
+        varCountRecords.forEach((subRecord) => {
+          varTotalCount += subRecord.values[0];
         });
-        return varDict;
-      })
-      .catch((err) => console.error("ERROR FETCHING:" + err));
+        varDict[varID] = varTotalCount;
+      });
+      return varDict;
+    } catch (err) {
+      console.log(`ERROR FETCH VARIATION COUNTS: ${err}`);
+    }
   }
 
   function significance(var1_met, var1_d, var2_met, var2_d) {
@@ -73,7 +74,7 @@ export default async function handler(req, res) {
       loser_d = var1_d;
       winner = 2;
     }
-    //let p_total = (var1_met + var2_met) / (var1_d + var2_d)
+
     let z =
       (p_winner - p_loser) /
       Math.sqrt(
@@ -87,23 +88,14 @@ export default async function handler(req, res) {
     return -1;
   }
 
-  /*
-    Returns [metric_var1_count, received_var1_count, metric_var2_count, received_var2_count, winner, loser]
-        Variable name is metric_count because metric = {Clicked Email, Opened Email}
-    Any information that is unavailable will be `undefined`
-    r_data : dict?, a received email dictionary with flow_id, message_id, variation, and count 
-    c_data : dict?, a *metric* email dictionary with flow_id, message_id, variation, and counticant 
-    */
   function compare_variations(
-    apiKey,
     skeleton,
     flow_id,
     message_id,
-    rID,
-    cID,
-    dateNow,
-    timeFrame
+    rCountDict,
+    cCountDict
   ) {
+    // GETTING THE VARIATION ID
     let subDict = skeleton[flow_id]?.[message_id];
     if (subDict == undefined) return;
     let c_variations = Object.keys(subDict);
@@ -111,28 +103,23 @@ export default async function handler(req, res) {
     let varID1 = c_variations[0];
     let varID2 = c_variations[1];
 
-    const startDate = new Date(dateNow - timeFrame * 86400000)
-      .toISOString()
-      .slice(0, 10);
-    const endDate = new Date(dateNow).toISOString().slice(0, 10);
-    const countVarsReceivedDict = fetch_variation_counts(
-      apiKey,
-      rID,
-      startDate,
-      endDate
-    );
-    const countVarsQueryDict = fetch_variation_counts(
-      apiKey,
-      cID,
-      startDate,
-      endDate
-    );
+    let c_1 = cCountDict[varID1];
+    let c_2 = cCountDict[varID2];
 
-    let c_1 = countVarsQueryDict[varID1];
-    let c_2 = countVarsQueryDict[varID2];
+    let r_1 = rCountDict[varID1];
+    let r_2 = rCountDict[varID2];
 
-    let r_1 = countVarsReceivedDict[varID1];
-    let r_2 = countVarsReceivedDict[varID2];
+    if (!(c_1 && c_2 && r_1 && r_2)) {
+      return {
+        metric1_count: c_1,
+        received1_count: r_1,
+        metric2_count: c_2,
+        received2_count: r_2,
+        winner: "building",
+        variation1_id: varID1,
+        variation2_id: varID2,
+      };
+    }
 
     let sig = significance(c_1, r_1, c_2, r_2);
 
@@ -175,6 +162,7 @@ export default async function handler(req, res) {
     }
   }
 
+  // A helper function to transform dictionary to array for easier access
   function dict_to_arr(data) {
     let result = [];
     let flow_arr = Object.keys(data);
@@ -220,25 +208,17 @@ export default async function handler(req, res) {
     }
   }
 
-  const find_intersection = (arr1, arr2) => {
-    return {
-      same: arr1.filter((x) => arr2.includes(x)),
-      diff: arr1
-        .filter((x) => !arr2.includes(x))
-        .concat(arr2.filter((x) => !arr1.includes(x))),
-    };
-  };
-
   // Returns an array of form [result_sig_tests, result_insig_tests] that indicate which tests are insignificant and which tests are significant
-  function get_significant_tests(
+  async function get_significant_tests(
     apiKey,
     skeleton,
+    messageDict,
     rID,
     cID,
     dateNow,
     timeFrame
   ) {
-    let message_id_dict = {};
+
     const arr_data = dict_to_arr(skeleton);
     let flowArr = [];
 
@@ -246,30 +226,62 @@ export default async function handler(req, res) {
       flowArr.push(subArr[0]);
     }
 
-    console.log(arr_data);
-
-    // const { same, diff } = find_intersection(result_c, result_r);
     let result_sig = [];
     let result_insig = [];
+    let result_building = [];
+
+    // GETTING THE VARIATION COUNTS
+    const startDate = new Date(dateNow - timeFrame * 86400000)
+      .toISOString()
+      .slice(0, 10);
+    const endDate = new Date(dateNow).toISOString().slice(0, 10);
+
+    const countVarsReceivedDict = await fetch_variation_counts(
+      apiKey,
+      rID,
+      startDate,
+      endDate
+    );
+    const countVarsQueryDict = await fetch_variation_counts(
+      apiKey,
+      cID,
+      startDate,
+      endDate
+    );
+
     for (let i = 0; i < arr_data.length; i++) {
       let flow = flowArr[i];
       let message_arr = Object.keys(skeleton[flow]);
 
       for (let j = 0; j < message_arr.length; j++) {
         let message = message_arr[j];
+        console.log(message);
         let test = compare_variations(
-          apiKey,
           skeleton,
           flow,
           message,
-          rID,
-          cID,
-          dateNow,
-          timeFrame
+          countVarsReceivedDict,
+          countVarsQueryDict
         );
         if (!test) continue;
-        if (test.winner) {
-          let message_name = message_id_dict[message];
+        if (test.winner == "building") {
+          let message_name = messageDict[message]
+          let test_obj = new TestObject(
+            flow,
+            message,
+            message_name,
+            test.variation1_id,
+            test.metric1_count,
+            test.variation2_id,
+            test.metric2_count,
+            test.received2_count,
+            test.winner,
+            test.loser
+          )
+          console.log(test_obj);
+          result_building.push(test_obj)
+        } else if (test.winner) {
+          let message_name = messageDict[message];
           let test_obj = new TestObject(
             flow,
             message,
@@ -282,10 +294,12 @@ export default async function handler(req, res) {
             test.received2_count,
             test.winner,
             test.loser
+            
           );
+          console.log(test_obj);
           result_sig.push(test_obj);
         } else {
-          let message_name = message_id_dict[message];
+          let message_name = messageDict[message];
           let test_obj = new TestObject(
             flow,
             message,
@@ -300,18 +314,19 @@ export default async function handler(req, res) {
             test.loser
           );
           result_insig.push(test_obj);
+          console.log(test_obj);
         }
       }
     }
-    // return { data: [result_sig, result_insig, diff] };
-    return { data: [result_sig, result_insig] };
+    return { data: [result_sig, result_insig, result_building] };
   }
 
   function read_from_DDB(apiKey) {
     const awsConfig = {
-      accessKeyId: "",
-      secretAccessKey: "",
+      accessKeyId: "", // Deleted for data privacy & security reasons
+      secretAccessKey: "", // Deleted for data privacy & security reasons
       region: "us-east-1",
+      // "endpoint": "https://dynamodb.us-east-1.amazonaws.com",
     };
 
     AWS.config.update(awsConfig);
@@ -341,15 +356,15 @@ export default async function handler(req, res) {
 
     let main_metricID = await extract_metrics_ID(apiKey, metric_name);
     let received_metricID = await extract_metrics_ID(apiKey, "Received Email");
-    console.log(main_metricID, received_metricID);
 
     const tableEntry = await read_from_DDB(apiKey);
-    console.log(tableEntry);
-    const skeleton = tableEntry.Item.message;
+    const skeleton = tableEntry.Item.data;
+    const messageDict = tableEntry.Item.messageDict
 
-    return get_significant_tests(
+    return await get_significant_tests(
       apiKey,
       skeleton,
+      messageDict,
       received_metricID,
       main_metricID,
       dateNow,
@@ -363,5 +378,6 @@ export default async function handler(req, res) {
       .json(await get_tests(privateApiKey, metric, +daysAgo));
   } catch (error) {
     console.log(error);
+    throw error;
   }
 }
