@@ -1,6 +1,6 @@
 const AWS = require("aws-sdk");
 const { MongoClient } = require("mongodb");
-const mongoDBURI = "";
+const mongoDBURI = ""; // Deleted for data privacy and security reasons.
 let db = null;
 let cursor = null;
 let myClient = null;
@@ -28,7 +28,6 @@ const lambda = new AWS.Lambda({
 
 const async_lambda_invoke = async (payload) => {
   const FunctionName = `${process.env.CHILD_FUNC_NAME}`;
-  // const result =
   await lambda
     .invoke({
       FunctionName,
@@ -36,14 +35,6 @@ const async_lambda_invoke = async (payload) => {
       Payload: JSON.stringify(payload),
     })
     .promise();
-  // }, function(error, any) {
-  //   if (error) {
-  //     console.log('CHILD RAN FAILURE:', error);
-  //   } else {
-  //     console.log("CHILD RUN SUCCESS")
-  //   }
-  // })
-  // .promise();
 };
 
 exports.handler = async (event) => {
@@ -72,19 +63,3 @@ exports.handler = async (event) => {
     body: JSON.stringify(apiKeys),
   };
 };
-
-// TEST FUNCTION -- For development only
-// (async () => {
-//   // Get documents from MongoDB
-//   const dbConnection = await connectToDatabase(mongoDBURI, "")
-//   const data = await getAPIKeysByEmail(dbConnection, "")
-//   myClient.close()
-
-//   // Parse API Keys
-//   const apiKeys = [];
-//   data.forEach((doc) => {
-//     apiKeys.push(...doc.apiKeys)
-//   })
-
-//   console.log(apiKeys)
-// })()
